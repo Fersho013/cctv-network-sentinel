@@ -1,0 +1,23 @@
+{
+  "name": "cctv-network-sentinel",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:desktop": "npm run dev --workspace=apps/desktop",
+    "dev:mobile": "npm run dev --workspace=apps/mobile",
+    "dev:server": "npm run dev --workspace=apps/server",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules",
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

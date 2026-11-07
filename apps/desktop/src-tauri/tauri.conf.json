@@ -1,0 +1,15 @@
+{
+  "productName": "CCTV Network Sentinel",
+  "version": "0.1.0",
+  "identifier": "com.cctv.sentinel",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [{ "title": "CCTV Network Sentinel", "width": 1280, "height": 800 }]
+  },
+  "bundle": { "active": true, "targets": "all" }
+}
