@@ -1,5 +1,8 @@
 {
   "expo": {
+    "name": "CCTV Sentinel Mobile",
+    "slug": "mobile",
+    "version": "1.0.0",
     "extra": {
       "eas": {
         "projectId": "ca37a07d-1d7f-426d-90c1-b5b89a44d524"
