@@ -7,10 +7,11 @@
     "build": "expo build"
   },
   "dependencies": {
-    "react": "18.2.0",
-    "react-native": "0.74.0",
+    "@cctv/core": "*",
+    "@types/react": "~18.2.79",
     "expo": "~51.0.0",
     "nativewind": "^4.0.0",
-    "@cctv/core": "*"
+    "react": "18.2.0",
+    "react-native": "0.74.0"
   }
 }

@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "ca37a07d-1d7f-426d-90c1-b5b89a44d524"
+      }
+    },
+    "android": {
+      "package": "com.fersho013.mobile"
+    }
+  }
+}
