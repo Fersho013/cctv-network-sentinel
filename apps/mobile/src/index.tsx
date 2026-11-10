@@ -9,15 +9,21 @@ export default function HomeScreen() {
   const [alerts, setAlerts] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(`${SERVER}/health`)
-      .then(() => {
-        setCameras([
-          { id: 1, name: 'DVR Hikvision', status: 'ONLINE', latency: 12 },
-          { id: 2, name: 'Tapo C200', status: 'OFFLINE', latency: -1 },
-        ]);
-        setAlerts([{ id: 1, message: 'Tapo C200 desconectada', severity: 'warning' }]);
-      })
-      .finally(() => setLoading(false));
+    const load = async () => {
+      try {
+        const c = await fetch(`${SERVER}/api/cameras`).then((r) => r.json());
+        const a = await fetch(`${SERVER}/api/alerts`).then((r) => r.json());
+        setCameras(c);
+        setAlerts(a);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
   }, []);
 
   const online = cameras.filter((c) => c.status === 'ONLINE').length;
