@@ -4,11 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "tsx src/index.ts",
-    "prebuild": "npm run build --workspace=@cctv/core",
+    "prebuild": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
     "build": "tsc -p tsconfig.json",
-    "pretypecheck": "npm run build --workspace=@cctv/core",
+    "pretypecheck": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
     "typecheck": "tsc --noEmit",
-    "prestart": "npm run build --workspace=@cctv/core",
+    "prestart": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
     "start": "node dist/index.js"
   },
   "dependencies": {
@@ -16,6 +16,7 @@
     "@cctv/db": "*",
     "@fastify/cors": "^9.0.0",
     "dotenv": "^16.4.0",
+    "drizzle-orm": "^0.33.0",
     "fastify": "^4.28.0"
   },
   "devDependencies": {

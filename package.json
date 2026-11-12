@@ -9,11 +9,13 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:desktop": "npm run dev --workspace=apps/desktop",
     "dev:mobile": "npm run dev --workspace=apps/mobile",
-    "predev:server": "npm run build --workspace=@cctv/core",
+    "predev:server": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
     "dev:server": "npm run dev --workspace=apps/server",
     "clean": "node -e \"const fs=require('fs');['node_modules','apps/desktop/node_modules','apps/mobile/node_modules','apps/server/node_modules','packages/core/node_modules','packages/db/node_modules','apps/desktop/dist','apps/server/dist','apps/mobile/dist','apps/desktop/src-tauri/target'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}))\"",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "db:generate": "npm run db:generate --workspace=@cctv/db",
+    "db:studio": "npm run db:studio --workspace=@cctv/db"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

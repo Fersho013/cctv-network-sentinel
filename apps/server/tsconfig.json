@@ -11,7 +11,7 @@
     "baseUrl": ".",
     "paths": {
       "@cctv/core": ["../../packages/core/dist/index.d.ts"],
-      "@cctv/db": ["../../packages/db/src/index.ts"]
+      "@cctv/db": ["../../packages/db/dist/index.d.ts"]
     }
   },
   "include": ["src"]

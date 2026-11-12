@@ -50,18 +50,34 @@ Copia `.env.example` a `.env` en `apps/server/` (o en la raíz) y define:
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 PORT=3000
+DATABASE_URL=file:./cctv.db
 ```
 
 Sin token de Telegram las alertas simplemente no se envían.
+
+## Base de datos
+
+Persistencia con SQLite (libSQL) y Drizzle ORM. Las tablas son `cameras`, `health_logs`, `alerts` y `users`.
+
+- El servidor aplica automáticamente las migraciones de `packages/db/migrations` al arrancar.
+- Por defecto la base de datos se crea como `apps/server/cctv.db` (ignorada por Git).
+- Cambia la ubicación con `DATABASE_URL`, por ejemplo `file:../../data/cctv.db`.
+
+```bash
+npm run db:generate   # genera una migración tras cambiar el esquema
+npm run db:studio     # abre Drizzle Studio
+```
+
+Al añadir una migración nueva, reinicia el servidor para aplicarla.
 
 ## API actual
 
 | Método | Ruta                 | Descripción                                      |
 | ------ | -------------------- | ------------------------------------------------ |
 | GET    | `/health`            | Estado del servidor                              |
-| GET    | `/api/cameras`       | Lista de cámaras (en memoria)                    |
-| GET    | `/api/alerts`        | Alertas (en memoria)                             |
-| GET    | `/api/history`       | Historial de heartbeats (en memoria)             |
+| GET    | `/api/cameras`       | Lista de cámaras persistidas                     |
+| GET    | `/api/alerts`        | Últimas 200 alertas                              |
+| GET    | `/api/history`       | Últimos 200 heartbeats                           |
 | GET    | `/api/scan/status`   | Indica si hay un escaneo en curso                |
 | POST   | `/api/scan`          | Escanea `{ "subnet": "192.168.1" }` y actualiza cámaras |
 | POST   | `/heartbeat`         | Registra estado de una cámara                    |
@@ -74,6 +90,5 @@ El escaneo comprueba RTSP (554) y HTTP (80, 443, 8000, 8080) en los 254 hosts de
 
 ## Limitaciones conocidas
 
-- El servidor guarda cámaras, alertas e historial en memoria; el esquema Drizzle de `packages/db` todavía no se usa ni hay migraciones.
-- El commit de webhooks solo incluye alertas por Telegram; falta el envío a webhooks.
+- Las alertas de Telegram están implementadas; falta el envío a webhooks genéricos.
 - No hay autenticación ni tests automatizados.

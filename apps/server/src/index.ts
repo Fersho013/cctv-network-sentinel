@@ -1,6 +1,16 @@
 import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import dotenv from 'dotenv';
+import { desc, eq } from 'drizzle-orm';
+import {
+  alerts,
+  cameras,
+  db,
+  healthLogs,
+  runMigrations,
+  type AlertRow,
+  type CameraRow,
+} from '@cctv/db';
 import { normalizeSubnet, scanLocalSubnet, type ScanResult } from '@cctv/core';
 
 dotenv.config();
@@ -13,7 +23,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 type CameraStatus = 'ONLINE' | 'OFFLINE';
 type AlertSeverity = 'info' | 'warning' | 'critical';
 
-interface Camera {
+interface CameraDto {
   id: number;
   name: string;
   brand: string;
@@ -23,29 +33,18 @@ interface Camera {
   rtspOpen: boolean;
   httpOpen: boolean;
   lastSeen: string | null;
+  createdAt: string;
 }
 
-interface Alert {
+interface AlertDto {
   id: number;
   cameraId: number | null;
   message: string;
   severity: AlertSeverity;
+  acknowledged: boolean;
   timestamp: string;
 }
 
-interface HistoryEntry {
-  cameraId: number;
-  status: CameraStatus;
-  latencyMs: number;
-  ts: number;
-}
-
-const cameras: Camera[] = [];
-const alerts: Alert[] = [];
-const history: HistoryEntry[] = [];
-
-let nextCameraId = 1;
-let nextAlertId = 1;
 let scanInProgress = false;
 
 async function sendTelegramAlert(text: string) {
@@ -69,79 +68,113 @@ async function sendTelegramAlert(text: string) {
   }
 }
 
-function pushAlert(message: string, severity: AlertSeverity, cameraId: number | null = null) {
-  alerts.unshift({
-    id: nextAlertId++,
-    cameraId,
-    message,
-    severity,
-    timestamp: new Date().toISOString(),
-  });
+function toCameraDto(camera: CameraRow): CameraDto {
+  return {
+    id: camera.id,
+    name: camera.name,
+    brand: camera.brand,
+    ipAddress: camera.ipAddress,
+    status: camera.status as CameraStatus,
+    latencyMs: camera.latencyMs,
+    rtspOpen: camera.rtspOpen,
+    httpOpen: camera.httpOpen,
+    lastSeen: camera.lastSeen?.toISOString() ?? null,
+    createdAt: camera.createdAt.toISOString(),
+  };
+}
 
-  if (alerts.length > 200) alerts.length = 200;
+function toAlertDto(alert: AlertRow): AlertDto {
+  return {
+    id: alert.id,
+    cameraId: alert.cameraId,
+    message: alert.message,
+    severity: alert.severity as AlertSeverity,
+    acknowledged: alert.acknowledged,
+    timestamp: alert.timestamp.toISOString(),
+  };
+}
+
+async function createAlert(
+  cameraId: number | null,
+  message: string,
+  severity: AlertSeverity,
+) {
+  await db.insert(alerts).values({ cameraId, message, severity, timestamp: new Date() });
 }
 
 function isCameraCandidate(result: ScanResult) {
   return result.status === 'ONLINE' && (result.rtspOpen || result.httpOpen);
 }
 
-function applyScanResults(results: ScanResult[], subnet: string) {
-  const now = new Date().toISOString();
+async function applyScanResults(results: ScanResult[], subnet: string) {
+  const now = new Date();
   const candidates = results.filter(isCameraCandidate);
-  const seenCameraIds = new Set<number>();
+  const seenIps = new Set(candidates.map((candidate) => candidate.ip));
+  const existingCameras = await db.select().from(cameras);
+  const cameraByIp = new Map(existingCameras.map((camera) => [camera.ipAddress, camera]));
+
   let added = 0;
   let updated = 0;
   let offline = 0;
 
   for (const result of candidates) {
-    let camera = cameras.find((item) => item.ipAddress === result.ip);
+    const camera = cameraByIp.get(result.ip);
 
     if (!camera) {
-      camera = {
-        id: nextCameraId++,
-        name: `Cámara ${result.ip}`,
-        brand: result.rtspOpen ? 'RTSP' : 'HTTP',
-        ipAddress: result.ip,
+      const [inserted] = await db
+        .insert(cameras)
+        .values({
+          name: `Cámara ${result.ip}`,
+          brand: result.rtspOpen ? 'RTSP' : 'HTTP',
+          ipAddress: result.ip,
+          status: 'ONLINE',
+          latencyMs: result.latencyMs,
+          rtspOpen: result.rtspOpen,
+          httpOpen: result.httpOpen,
+          lastSeen: now,
+        })
+        .returning();
+
+      cameraByIp.set(result.ip, inserted);
+      added++;
+      continue;
+    }
+
+    if (camera.status === 'OFFLINE') {
+      await createAlert(
+        camera.id,
+        `Cámara recuperada: ${camera.name} (${camera.ipAddress})`,
+        'info',
+      );
+    }
+
+    await db
+      .update(cameras)
+      .set({
         status: 'ONLINE',
         latencyMs: result.latencyMs,
         rtspOpen: result.rtspOpen,
         httpOpen: result.httpOpen,
         lastSeen: now,
-      };
-      cameras.push(camera);
-      added++;
-    } else {
-      if (camera.status === 'OFFLINE') {
-        pushAlert(
-          `Cámara recuperada: ${camera.name} (${camera.ipAddress})`,
-          'info',
-          camera.id,
-        );
-      }
+      })
+      .where(eq(cameras.id, camera.id));
 
-      camera.status = 'ONLINE';
-      camera.latencyMs = result.latencyMs;
-      camera.rtspOpen = result.rtspOpen;
-      camera.httpOpen = result.httpOpen;
-      camera.lastSeen = now;
-      updated++;
-    }
-
-    seenCameraIds.add(camera.id);
+    updated++;
   }
 
-  for (const camera of cameras) {
+  for (const camera of existingCameras) {
     const belongsToScan = camera.ipAddress.startsWith(subnet);
-    if (!belongsToScan || seenCameraIds.has(camera.id) || camera.status === 'OFFLINE') continue;
+    if (!belongsToScan || seenIps.has(camera.ipAddress) || camera.status === 'OFFLINE') continue;
 
-    camera.status = 'OFFLINE';
-    camera.latencyMs = -1;
-    camera.lastSeen = now;
-    offline++;
+    await db
+      .update(cameras)
+      .set({ status: 'OFFLINE', latencyMs: -1, lastSeen: now })
+      .where(eq(cameras.id, camera.id));
 
     const message = `Cámara OFFLINE: ${camera.name} (${camera.ipAddress})`;
-    pushAlert(message, 'warning', camera.id);
+    await createAlert(camera.id, message, 'warning');
     void sendTelegramAlert(`⚠️ ${message}`);
+    offline++;
   }
 
   return { added, updated, offline };
@@ -150,9 +183,35 @@ function applyScanResults(results: ScanResult[], subnet: string) {
 app.register(cors, { origin: true });
 
 app.get('/health', async () => ({ status: 'ok' }));
-app.get('/api/cameras', async () => cameras);
-app.get('/api/alerts', async () => alerts);
-app.get('/api/history', async () => history.slice(-200).reverse());
+
+app.get('/api/cameras', async () => {
+  const rows = await db.select().from(cameras).orderBy(cameras.id);
+  return rows.map(toCameraDto);
+});
+
+app.get('/api/alerts', async () => {
+  const rows = await db.select().from(alerts).orderBy(desc(alerts.timestamp)).limit(200);
+  return rows.map(toAlertDto);
+});
+
+app.get('/api/history', async () => {
+  const rows = await db
+    .select()
+    .from(healthLogs)
+    .orderBy(desc(healthLogs.timestamp))
+    .limit(200);
+
+  return rows.map((row) => ({
+    id: row.id,
+    cameraId: row.cameraId,
+    status: row.status,
+    latencyMs: row.latencyMs,
+    rtspOpen: row.rtspOpen,
+    httpOpen: row.httpOpen,
+    timestamp: row.timestamp.toISOString(),
+  }));
+});
+
 app.get('/api/scan/status', async () => ({ scanning: scanInProgress }));
 
 app.post<{ Body?: { subnet?: string } }>('/api/scan', async (req, reply) => {
@@ -172,7 +231,7 @@ app.post<{ Body?: { subnet?: string } }>('/api/scan', async (req, reply) => {
 
   try {
     const results = await scanLocalSubnet(subnet);
-    const summary = applyScanResults(results, subnet);
+    const summary = await applyScanResults(results, subnet);
 
     return {
       subnet,
@@ -183,13 +242,23 @@ app.post<{ Body?: { subnet?: string } }>('/api/scan', async (req, reply) => {
       candidates: results.filter(isCameraCandidate),
       summary,
     };
+  } catch (error) {
+    app.log.error({ err: error }, 'El escaneo falló');
+    return reply.code(500).send({ error: 'El escaneo de red falló.' });
   } finally {
     scanInProgress = false;
   }
 });
 
 app.post<{
-  Body?: { cameraId?: number; status?: CameraStatus; latency?: number; latencyMs?: number };
+  Body?: {
+    cameraId?: number;
+    status?: CameraStatus;
+    latency?: number;
+    latencyMs?: number;
+    rtspOpen?: boolean;
+    httpOpen?: boolean;
+  };
 }>('/heartbeat', async (req, reply) => {
   const body = req.body;
   const validStatus = body?.status === 'ONLINE' || body?.status === 'OFFLINE';
@@ -200,34 +269,55 @@ app.post<{
       .send({ error: 'Se requiere cameraId numérico y status ONLINE/OFFLINE.' });
   }
 
-  const camera = cameras.find((item) => item.id === body.cameraId);
+  const [camera] = await db.select().from(cameras).where(eq(cameras.id, body.cameraId));
   if (!camera) {
     return reply.code(404).send({ error: 'Cámara no encontrada.' });
   }
 
   const previousStatus = camera.status;
   const latencyMs = body.latencyMs ?? body.latency ?? -1;
-  const now = new Date().toISOString();
+  const now = new Date();
+  const nextStatus = body.status as CameraStatus;
 
-  camera.status = body.status as CameraStatus;
-  camera.latencyMs = latencyMs;
-  camera.lastSeen = now;
-  history.push({ cameraId: camera.id, status: camera.status, latencyMs, ts: Date.now() });
+  await db
+    .update(cameras)
+    .set({
+      status: nextStatus,
+      latencyMs,
+      rtspOpen: body.rtspOpen ?? camera.rtspOpen,
+      httpOpen: body.httpOpen ?? camera.httpOpen,
+      lastSeen: now,
+    })
+    .where(eq(cameras.id, camera.id));
 
-  if (previousStatus !== 'OFFLINE' && camera.status === 'OFFLINE') {
+  await db.insert(healthLogs).values({
+    cameraId: camera.id,
+    status: nextStatus,
+    latencyMs,
+    rtspOpen: body.rtspOpen ?? camera.rtspOpen,
+    httpOpen: body.httpOpen ?? camera.httpOpen,
+    timestamp: now,
+  });
+
+  if (previousStatus !== 'OFFLINE' && nextStatus === 'OFFLINE') {
     const message = `Cámara OFFLINE: ${camera.name} (${camera.ipAddress})`;
-    pushAlert(message, 'warning', camera.id);
+    await createAlert(camera.id, message, 'warning');
     await sendTelegramAlert(`⚠️ ${message}`);
-  } else if (previousStatus === 'OFFLINE' && camera.status === 'ONLINE') {
-    pushAlert(`Cámara recuperada: ${camera.name} (${camera.ipAddress})`, 'info', camera.id);
+  } else if (previousStatus === 'OFFLINE' && nextStatus === 'ONLINE') {
+    await createAlert(
+      camera.id,
+      `Cámara recuperada: ${camera.name} (${camera.ipAddress})`,
+      'info',
+    );
   }
 
-  app.log.info({ msg: 'heartbeat received', cameraId: camera.id, status: camera.status });
+  app.log.info({ msg: 'heartbeat received', cameraId: camera.id, status: nextStatus });
   return { received: true };
 });
 
 const start = async () => {
   try {
+    await runMigrations();
     await app.listen({ port: Number(process.env.PORT) || 3000, host: '0.0.0.0' });
   } catch (err) {
     app.log.error(err);
