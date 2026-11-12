@@ -21,6 +21,17 @@ const HTTP_PORTS = [80, 443, 8000, 8080];
 const DEFAULT_TIMEOUT_MS = 700;
 const DEFAULT_CONCURRENCY = 64;
 
+/**
+ * Comprueba un puerto TCP y devuelve la latencia en ms, o -1 si está cerrado.
+ */
+export function checkTcpPort(
+  ip: string,
+  port: number,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<number> {
+  return probePort(ip, port, timeoutMs);
+}
+
 function probePort(ip: string, port: number, timeoutMs: number): Promise<number> {
   return new Promise((resolve) => {
     const start = Date.now();

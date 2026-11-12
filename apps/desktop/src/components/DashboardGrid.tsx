@@ -1,11 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  deleteCamera,
   fetchAlerts,
   fetchCameras,
+  fetchPresets,
   scanSubnet,
+  snapshotUrl,
   type Alert,
   type Camera,
+  type CameraPreset,
 } from '../api';
+import CameraForm from './CameraForm';
+import LiveView from './LiveView';
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -21,11 +27,17 @@ function errorMessage(error: unknown) {
 export const DashboardGrid: React.FC = () => {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [presets, setPresets] = useState<CameraPreset[]>([]);
   const [subnet, setSubnet] = useState('192.168.1');
   const [scanning, setScanning] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const [liveCamera, setLiveCamera] = useState<Camera | null>(null);
+  const [formCamera, setFormCamera] = useState<Camera | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [snapshotTick, setSnapshotTick] = useState(Date.now());
+  const [failedSnapshots, setFailedSnapshots] = useState<Record<number, boolean>>({});
 
   const online = cameras.filter((camera) => camera.status === 'ONLINE').length;
   const offline = cameras.length - online;
@@ -35,6 +47,8 @@ export const DashboardGrid: React.FC = () => {
       const [nextCameras, nextAlerts] = await Promise.all([fetchCameras(), fetchAlerts()]);
       setCameras(nextCameras);
       setAlerts(nextAlerts);
+      setSnapshotTick(Date.now());
+      setFailedSnapshots({});
       setError(null);
     } catch (err) {
       setError(`No se pudo conectar con el servidor: ${errorMessage(err)}`);
@@ -46,6 +60,12 @@ export const DashboardGrid: React.FC = () => {
     const interval = setInterval(() => void load(), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [load]);
+
+  useEffect(() => {
+    fetchPresets()
+      .then(setPresets)
+      .catch(() => setPresets([]));
+  }, []);
 
   const rescan = async () => {
     setScanning(true);
@@ -67,6 +87,30 @@ export const DashboardGrid: React.FC = () => {
     }
   };
 
+  const removeCamera = async (camera: Camera) => {
+    const confirmed = window.confirm(
+      `¿Eliminar «${camera.name}»? Se borrarán también sus credenciales guardadas.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await deleteCamera(camera.id);
+      await load();
+    } catch (err) {
+      setError(`No se pudo eliminar la cámara: ${errorMessage(err)}`);
+    }
+  };
+
+  const openNewCamera = () => {
+    setFormCamera(null);
+    setFormOpen(true);
+  };
+
+  const openEditCamera = (camera: Camera) => {
+    setFormCamera(camera);
+    setFormOpen(true);
+  };
+
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-100">
       <main className="flex-1 overflow-y-auto p-6">
@@ -74,7 +118,7 @@ export const DashboardGrid: React.FC = () => {
           <div>
             <h1 className="text-2xl font-bold text-emerald-400">CCTV Network Sentinel</h1>
             <p className="mt-1 text-sm text-zinc-400">
-              Escaneo de red y monitorización de cámaras en tiempo real
+              Vigilancia en vivo y monitorización de cámaras en tu red local
             </p>
           </div>
 
@@ -91,9 +135,15 @@ export const DashboardGrid: React.FC = () => {
             <button
               onClick={rescan}
               disabled={scanning}
-              className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold hover:bg-emerald-500 disabled:opacity-60"
+              className="rounded-md border border-zinc-600 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
             >
               {scanning ? 'Escaneando...' : 'Escanear red'}
+            </button>
+            <button
+              onClick={openNewCamera}
+              className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+            >
+              + Añadir cámara
             </button>
           </div>
         </header>
@@ -136,8 +186,8 @@ export const DashboardGrid: React.FC = () => {
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center">
             <p className="mb-2 text-zinc-300">No hay cámaras registradas todavía.</p>
             <p className="text-sm text-zinc-500">
-              Introduce tu subred y pulsa «Escanear red» para descubrir dispositivos con RTSP o
-              HTTP abiertos.
+              Pulsa «Añadir cámara» para configurar tu Tapo, o escanea la red para descubrir
+              dispositivos con RTSP/HTTP abiertos.
             </p>
           </div>
         )}
@@ -146,39 +196,108 @@ export const DashboardGrid: React.FC = () => {
           {cameras.map((camera) => (
             <div
               key={camera.id}
-              className="rounded-lg border border-zinc-800 bg-zinc-900 p-4"
+              className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900"
             >
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="truncate font-medium">{camera.name}</span>
+              <div className="relative aspect-video bg-black">
+                {!failedSnapshots[camera.id] && camera.hasPassword ? (
+                  <img
+                    src={snapshotUrl(camera.id, snapshotTick)}
+                    alt={`Vista de ${camera.name}`}
+                    className="h-full w-full object-cover"
+                    onError={() =>
+                      setFailedSnapshots((current) => ({ ...current, [camera.id]: true }))
+                    }
+                  />
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-xs text-zinc-500">
+                    <span className="text-2xl">📷</span>
+                    {camera.hasPassword
+                      ? 'Sin vista previa'
+                      : 'Añade usuario y contraseña para ver la imagen'}
+                  </div>
+                )}
+
                 <span
-                  className={`h-3 w-3 shrink-0 rounded-full ${
-                    camera.status === 'ONLINE' ? 'animate-pulse bg-emerald-500' : 'bg-red-500'
+                  className={`absolute right-2 top-2 h-3 w-3 rounded-full ring-2 ring-black/50 ${
+                    camera.status === 'ONLINE'
+                      ? 'animate-pulse bg-emerald-500'
+                      : 'bg-red-500'
                   }`}
                   title={camera.status}
                 />
+
+                {camera.hasPassword && (
+                  <button
+                    onClick={() => setLiveCamera(camera)}
+                    className="absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition hover:bg-black/40 hover:opacity-100"
+                  >
+                    <span className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white">
+                      ▶ Ver en vivo
+                    </span>
+                  </button>
+                )}
               </div>
 
-              <p className="text-xs text-zinc-400">{camera.ipAddress}</p>
+              <div className="p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="truncate font-medium">{camera.name}</span>
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-zinc-500">
+                    {camera.status}
+                  </span>
+                </div>
 
-              <div className="mt-2 flex flex-wrap gap-1 text-[10px] uppercase tracking-wide">
-                <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">{camera.brand}</span>
-                {camera.rtspOpen && (
-                  <span className="rounded bg-emerald-900/60 px-2 py-0.5 text-emerald-300">RTSP</span>
-                )}
-                {camera.httpOpen && (
-                  <span className="rounded bg-sky-900/60 px-2 py-0.5 text-sky-300">HTTP</span>
-                )}
+                <p className="text-xs text-zinc-400">{camera.ipAddress}</p>
+
+                <div className="mt-2 flex flex-wrap gap-1 text-[10px] uppercase tracking-wide">
+                  <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">
+                    {camera.brand}
+                  </span>
+                  {camera.rtspOpen && (
+                    <span className="rounded bg-emerald-900/60 px-2 py-0.5 text-emerald-300">
+                      RTSP
+                    </span>
+                  )}
+                  {camera.httpOpen && (
+                    <span className="rounded bg-sky-900/60 px-2 py-0.5 text-sky-300">HTTP</span>
+                  )}
+                  {camera.streaming && (
+                    <span className="rounded bg-amber-900/60 px-2 py-0.5 text-amber-300">
+                      EN VIVO
+                    </span>
+                  )}
+                </div>
+
+                <p className="mt-3 text-sm">
+                  Latencia:{' '}
+                  <span className="text-amber-400">
+                    {camera.latencyMs >= 0 ? `${camera.latencyMs} ms` : 'N/A'}
+                  </span>
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Última vez: {camera.lastSeen ? formatTimestamp(camera.lastSeen) : 'nunca'}
+                </p>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setLiveCamera(camera)}
+                    className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+                  >
+                    Ver en vivo
+                  </button>
+                  <button
+                    onClick={() => openEditCamera(camera)}
+                    className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-800"
+                  >
+                    Editar
+                  </button>
+                  <button
+                    onClick={() => void removeCamera(camera)}
+                    className="rounded-md border border-red-900 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-950/60"
+                  >
+                    Eliminar
+                  </button>
+                </div>
               </div>
-
-              <p className="mt-3 text-sm">
-                Latencia:{' '}
-                <span className="text-amber-400">
-                  {camera.latencyMs >= 0 ? `${camera.latencyMs} ms` : 'N/A'}
-                </span>
-              </p>
-              <p className="mt-1 text-xs text-zinc-500">
-                Última vez: {camera.lastSeen ? formatTimestamp(camera.lastSeen) : 'nunca'}
-              </p>
             </div>
           ))}
         </div>
@@ -210,6 +329,20 @@ export const DashboardGrid: React.FC = () => {
       >
         {panelOpen ? '›' : '‹'}
       </button>
+
+      {formOpen && (
+        <CameraForm
+          camera={formCamera}
+          presets={presets}
+          onClose={() => setFormOpen(false)}
+          onSaved={() => {
+            setFormOpen(false);
+            void load();
+          }}
+        />
+      )}
+
+      {liveCamera && <LiveView camera={liveCamera} onClose={() => setLiveCamera(null)} />}
     </div>
   );
 };
