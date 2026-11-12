@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, ActivityIndicator } from 'react-native';
+import { registerRootComponent } from 'expo';
+import '../global.css';
 
 const SERVER = 'http://localhost:3000';
 
@@ -28,7 +30,10 @@ export default function HomeScreen() {
 
   const online = cameras.filter((c) => c.status === 'ONLINE').length;
   const offline = cameras.length - online;
-  const avgLatency = cameras.filter((c) => c.latency > 0).reduce((a, b) => a + b.latency, 0) / (online || 1);
+  const avgLatency =
+    cameras
+      .filter((c) => c.latencyMs > 0)
+      .reduce((total, camera) => total + camera.latencyMs, 0) / (online || 1);
 
   if (loading) return <ActivityIndicator size="large" color="#22c55e" className="mt-10" />;
 
@@ -59,3 +64,5 @@ export default function HomeScreen() {
     </ScrollView>
   );
 }
+
+registerRootComponent(HomeScreen);

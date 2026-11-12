@@ -1,3 +1,5 @@
+import net from 'node:net';
+
 export type ScanStatus = 'ONLINE' | 'OFFLINE';
 
 export interface ScanResult {
@@ -9,77 +11,123 @@ export interface ScanResult {
   lastSeen: Date;
 }
 
-const RTSP_PORT = 554;
-const HTTP_PORTS = [80, 443];
+export interface ScanOptions {
+  timeoutMs?: number;
+  concurrency?: number;
+}
 
-function pingHost(ip: string, timeoutMs = 1000): Promise<number> {
+const RTSP_PORT = 554;
+const HTTP_PORTS = [80, 443, 8000, 8080];
+const DEFAULT_TIMEOUT_MS = 700;
+const DEFAULT_CONCURRENCY = 64;
+
+function probePort(ip: string, port: number, timeoutMs: number): Promise<number> {
   return new Promise((resolve) => {
     const start = Date.now();
-    const sock = new (require('net').Socket)();
-    sock.setTimeout(timeoutMs);
-    sock.on('connect', () => {
-      const latency = Date.now() - start;
-      sock.destroy();
+    const socket = new net.Socket();
+    let settled = false;
+
+    const finish = (latency: number) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
       resolve(latency);
-    });
-    sock.on('timeout', () => {
-      sock.destroy();
-      resolve(-1);
-    });
-    sock.on('error', () => {
-      sock.destroy();
-      resolve(-1);
-    });
-    sock.connect(80, ip);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(Date.now() - start));
+    socket.once('timeout', () => finish(-1));
+    socket.once('error', () => finish(-1));
+    socket.connect(port, ip);
   });
 }
 
-function checkPort(ip: string, port: number, timeoutMs = 800): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = new (require('net').Socket)();
-    sock.setTimeout(timeoutMs);
-    sock.on('connect', () => {
-      sock.destroy();
-      resolve(true);
-    });
-    sock.on('timeout', () => {
-      sock.destroy();
-      resolve(false);
-    });
-    sock.on('error', () => {
-      sock.destroy();
-      resolve(false);
-    });
-    sock.connect(port, ip);
-  });
+/**
+ * Comprueba los puertos habituales de una cámara IP.
+ * La latencia es la del primer puerto que responde.
+ */
+export async function scanHost(ip: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<ScanResult> {
+  const [rtspLatency, ...httpLatencies] = await Promise.all([
+    probePort(ip, RTSP_PORT, timeoutMs),
+    ...HTTP_PORTS.map((port) => probePort(ip, port, timeoutMs)),
+  ]);
+
+  const successes = [rtspLatency, ...httpLatencies].filter((latency) => latency >= 0);
+  const online = successes.length > 0;
+
+  return {
+    ip,
+    status: online ? 'ONLINE' : 'OFFLINE',
+    rtspOpen: rtspLatency >= 0,
+    httpOpen: httpLatencies.some((latency) => latency >= 0),
+    latencyMs: online ? Math.min(...successes) : -1,
+    lastSeen: new Date(),
+  };
 }
 
-export async function scanLocalSubnet(subnet: string): Promise<ScanResult[]> {
-  const base = subnet.endsWith('.') ? subnet : subnet + '.';
+/**
+ * Normaliza una subred /24. Acepta "192.168.1", "192.168.1." o "192.168.1.0/24".
+ */
+export function normalizeSubnet(subnet: string): string {
+  const cleaned = subnet.trim().replace(/\/24$/, '').replace(/\.$/, '');
+  const octets = cleaned.split('.');
+
+  if (octets.length === 4 && octets[3] === '0') {
+    octets.pop();
+  }
+
+  if (octets.length !== 3) {
+    throw new Error('Subred inválida. Usa el formato 192.168.1 o 192.168.1.0/24.');
+  }
+
+  for (const octet of octets) {
+    if (!/^\d{1,3}$/.test(octet) || Number(octet) > 255) {
+      throw new Error(`Octeto inválido: "${octet}".`);
+    }
+  }
+
+  return `${octets.join('.')}.`;
+}
+
+async function forEachLimited<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      await worker(items[index]);
+    }
+  });
+
+  await Promise.all(workers);
+}
+
+/**
+ * Escanea los 254 hosts de una subred /24 en busca de RTSP/HTTP abiertos.
+ */
+export async function scanLocalSubnet(
+  subnet: string,
+  options: ScanOptions = {},
+): Promise<ScanResult[]> {
+  const base = normalizeSubnet(subnet);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const results: ScanResult[] = [];
 
-  const tasks = Array.from({ length: 254 }, (_, i) => i + 1).map(async (n) => {
-    const ip = `${base}${n}`;
-    const latency = await pingHost(ip);
-    const online = latency >= 0;
-    const rtspOpen = online ? await checkPort(ip, RTSP_PORT) : false;
-    const httpOpen = online
-      ? (await Promise.all(HTTP_PORTS.map((p) => checkPort(ip, p)))).some(Boolean)
-      : false;
-    results.push({
-      ip,
-      status: online ? 'ONLINE' : 'OFFLINE',
-      rtspOpen,
-      httpOpen,
-      latencyMs: online ? latency : -1,
-      lastSeen: new Date(),
-    });
-  });
+  await forEachLimited(
+    Array.from({ length: 254 }, (_, index) => index + 1),
+    concurrency,
+    async (host) => {
+      results.push(await scanHost(`${base}${host}`, timeoutMs));
+    },
+  );
 
-  await Promise.all(tasks);
   return results.sort((a, b) => {
-    const an = parseInt(a.ip.split('.').pop() || '0', 10);
-    const bn = parseInt(b.ip.split('.').pop() || '0', 10);
+    const an = Number(a.ip.split('.').pop() ?? 0);
+    const bn = Number(b.ip.split('.').pop() ?? 0);
     return an - bn;
   });
 }

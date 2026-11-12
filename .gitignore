@@ -4,7 +4,12 @@ dist/
 .expo/
 src-tauri/target/
 *.db
+*.db-journal
 *.log
 .env
+.env.*
+!.env.example
+coverage/
+*.tsbuildinfo
 .DS_Store
 Thumbs.db

@@ -4,17 +4,31 @@
   "private": true,
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db && npm run build --workspace=apps/server && npm run build --workspace=apps/desktop && npm run build --workspace=apps/mobile",
+    "pretypecheck": "npm run build --workspace=@cctv/core",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:desktop": "npm run dev --workspace=apps/desktop",
     "dev:mobile": "npm run dev --workspace=apps/mobile",
+    "predev:server": "npm run build --workspace=@cctv/core",
     "dev:server": "npm run dev --workspace=apps/server",
-    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules",
-    "lint": "eslint . --ext .ts,.tsx"
+    "clean": "node -e \"const fs=require('fs');['node_modules','apps/desktop/node_modules','apps/mobile/node_modules','apps/server/node_modules','packages/core/node_modules','packages/db/node_modules','apps/desktop/dist','apps/server/dist','apps/mobile/dist','apps/desktop/src-tauri/target'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}))\"",
+    "lint": "eslint .",
+    "format": "prettier --write ."
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
-    "prettier": "^3.3.0"
+    "globals": "^15.0.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "overrides": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@types/react": "18.3.31",
+    "react-native": "0.74.5"
   },
   "engines": {
     "node": ">=18.0.0",

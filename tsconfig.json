@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -16,7 +16,5 @@
       "@cctv/core": ["packages/core/src/index.ts"],
       "@cctv/db": ["packages/db/src/index.ts"]
     }
-  },
-  "include": ["packages", "apps"],
-  "exclude": ["node_modules", "dist", "build"]
+  }
 }

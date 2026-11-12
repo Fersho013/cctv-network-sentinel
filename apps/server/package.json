@@ -4,14 +4,22 @@
   "private": true,
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
+    "prebuild": "npm run build --workspace=@cctv/core",
+    "build": "tsc -p tsconfig.json",
+    "pretypecheck": "npm run build --workspace=@cctv/core",
+    "typecheck": "tsc --noEmit",
+    "prestart": "npm run build --workspace=@cctv/core",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "fastify": "^4.28.0",
-    "@cctv/db": "*"
+    "@cctv/core": "*",
+    "@cctv/db": "*",
+    "@fastify/cors": "^9.0.0",
+    "dotenv": "^16.4.0",
+    "fastify": "^4.28.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

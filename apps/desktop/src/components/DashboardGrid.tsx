@@ -1,136 +1,212 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  fetchAlerts,
+  fetchCameras,
+  scanSubnet,
+  type Alert,
+  type Camera,
+} from '../api';
 
-interface Camera {
-  id: number;
-  name: string;
-  ipAddress: string;
-  status: 'ONLINE' | 'OFFLINE';
-  latencyMs: number;
+const POLL_INTERVAL_MS = 10_000;
+
+function formatTimestamp(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-interface Alert {
-  id: number;
-  message: string;
-  severity: 'info' | 'warning' | 'critical';
-  timestamp: string;
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
-
-const INITIAL_MOCK: Camera[] = [
-  { id: 1, name: 'DVR Hikvision 4CH', ipAddress: '192.168.1.10', status: 'ONLINE', latencyMs: 12 },
-  { id: 2, name: 'Tapo C200 - Salon', ipAddress: '192.168.1.21', status: 'ONLINE', latencyMs: 34 },
-  { id: 3, name: 'Tapo C200 - Patio', ipAddress: '192.168.1.22', status: 'OFFLINE', latencyMs: -1 },
-  { id: 4, name: 'Dahua Dome PTZ', ipAddress: '192.168.1.30', status: 'ONLINE', latencyMs: 21 },
-];
 
 export const DashboardGrid: React.FC = () => {
-  const [cameras, setCameras] = useState<Camera[]>(INITIAL_MOCK);
+  const [cameras, setCameras] = useState<Camera[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [subnet, setSubnet] = useState('192.168.1');
   const [scanning, setScanning] = useState(false);
-  const [simulate, setSimulate] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
+
+  const online = cameras.filter((camera) => camera.status === 'ONLINE').length;
+  const offline = cameras.length - online;
+
+  const load = useCallback(async () => {
+    try {
+      const [nextCameras, nextAlerts] = await Promise.all([fetchCameras(), fetchAlerts()]);
+      setCameras(nextCameras);
+      setAlerts(nextAlerts);
+      setError(null);
+    } catch (err) {
+      setError(`No se pudo conectar con el servidor: ${errorMessage(err)}`);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!simulate) {
-      setCameras([]);
-      return;
-    }
-    setCameras(INITIAL_MOCK);
-    const interval = setInterval(() => {
-      setCameras((prev) =>
-        prev.map((c) => {
-          const drop = Math.random() < 0.12;
-          return {
-            ...c,
-            status: drop ? 'OFFLINE' : 'ONLINE',
-            latencyMs: drop ? -1 : Math.floor(5 + Math.random() * 60),
-          };
-        }),
-      );
-    }, 3000);
+    void load();
+    const interval = setInterval(() => void load(), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [simulate]);
+  }, [load]);
 
   const rescan = async () => {
     setScanning(true);
-    await new Promise((r) => setTimeout(r, 1800));
-    if (simulate) setCameras(INITIAL_MOCK);
-    setScanning(false);
+    setError(null);
+    setScanMessage(null);
+
+    try {
+      const result = await scanSubnet(subnet);
+      setScanMessage(
+        `${result.onlineHosts} hosts respondieron, ${result.candidates.length} candidatos. ` +
+          `${result.summary.added} nuevas, ${result.summary.updated} actualizadas, ` +
+          `${result.summary.offline} marcadas offline (${(result.durationMs / 1000).toFixed(1)} s).`,
+      );
+      await load();
+    } catch (err) {
+      setError(`El escaneo falló: ${errorMessage(err)}`);
+    } finally {
+      setScanning(false);
+    }
   };
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-100">
-      <main className="flex-1 p-6">
-        <header className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold text-emerald-400">CCTV Network Sentinel</h1>
-          <div className="flex gap-3 items-center">
-            <label className="flex items-center gap-2 text-sm">
+      <main className="flex-1 overflow-y-auto p-6">
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-emerald-400">CCTV Network Sentinel</h1>
+            <p className="mt-1 text-sm text-zinc-400">
+              Escaneo de red y monitorización de cámaras en tiempo real
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs uppercase tracking-wide text-zinc-400">
+              Subred /24
               <input
-                type="checkbox"
-                checked={simulate}
-                onChange={(e) => setSimulate(e.target.checked)}
+                value={subnet}
+                onChange={(event) => setSubnet(event.target.value)}
+                placeholder="192.168.1"
+                className="w-40 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-zinc-100 outline-none focus:border-emerald-500"
               />
-              Modo Simulación
             </label>
             <button
               onClick={rescan}
               disabled={scanning}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 rounded-md text-sm font-semibold"
+              className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold hover:bg-emerald-500 disabled:opacity-60"
             >
-              {scanning ? 'Escaneando...' : 'Re-escanear'}
+              {scanning ? 'Escaneando...' : 'Escanear red'}
             </button>
           </div>
         </header>
+
+        <section className="mb-5 grid grid-cols-3 gap-3">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <p className="text-xs uppercase tracking-wide text-zinc-400">Online</p>
+            <p className="text-2xl font-bold text-emerald-400">{online}</p>
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <p className="text-xs uppercase tracking-wide text-zinc-400">Offline</p>
+            <p className="text-2xl font-bold text-red-400">{offline}</p>
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <p className="text-xs uppercase tracking-wide text-zinc-400">Total</p>
+            <p className="text-2xl font-bold text-zinc-100">{cameras.length}</p>
+          </div>
+        </section>
+
         {scanning && (
-          <div className="mb-4 text-sm text-amber-400 flex items-center gap-2">
-            <span className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-            Escaneando subred 192.168.1.0/24...
+          <div className="mb-4 flex items-center gap-2 text-sm text-amber-400">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+            Escaneando {subnet}.0/24 en busca de RTSP/HTTP...
           </div>
         )}
-        {cameras.length === 0 && !simulate && (
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-8 text-center">
-            <p className="text-zinc-300 mb-2">
-              No se han detectado cámaras en la red local.
-            </p>
-            <p className="text-zinc-500 text-sm">
-              Haz clic en 'Re-escanear' para buscar dispositivos o activa el 'Modo Simulación' para realizar pruebas.
+
+        {scanMessage && !scanning && (
+          <div className="mb-4 rounded-md border border-emerald-800 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-300">
+            {scanMessage}
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-4 rounded-md border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {cameras.length === 0 && !scanning && (
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center">
+            <p className="mb-2 text-zinc-300">No hay cámaras registradas todavía.</p>
+            <p className="text-sm text-zinc-500">
+              Introduce tu subred y pulsa «Escanear red» para descubrir dispositivos con RTSP o
+              HTTP abiertos.
             </p>
           </div>
         )}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {cameras.map((c) => (
-            <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium">{c.name}</span>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {cameras.map((camera) => (
+            <div
+              key={camera.id}
+              className="rounded-lg border border-zinc-800 bg-zinc-900 p-4"
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="truncate font-medium">{camera.name}</span>
                 <span
-                  className={`w-3 h-3 rounded-full ${
-                    c.status === 'ONLINE' ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
+                  className={`h-3 w-3 shrink-0 rounded-full ${
+                    camera.status === 'ONLINE' ? 'animate-pulse bg-emerald-500' : 'bg-red-500'
                   }`}
+                  title={camera.status}
                 />
               </div>
-              <p className="text-xs text-zinc-400">{c.ipAddress}</p>
-              <p className="text-sm mt-2">
-                Latencia: <span className="text-amber-400">{c.latencyMs >= 0 ? c.latencyMs + ' ms' : 'N/A'}</span>
+
+              <p className="text-xs text-zinc-400">{camera.ipAddress}</p>
+
+              <div className="mt-2 flex flex-wrap gap-1 text-[10px] uppercase tracking-wide">
+                <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">{camera.brand}</span>
+                {camera.rtspOpen && (
+                  <span className="rounded bg-emerald-900/60 px-2 py-0.5 text-emerald-300">RTSP</span>
+                )}
+                {camera.httpOpen && (
+                  <span className="rounded bg-sky-900/60 px-2 py-0.5 text-sky-300">HTTP</span>
+                )}
+              </div>
+
+              <p className="mt-3 text-sm">
+                Latencia:{' '}
+                <span className="text-amber-400">
+                  {camera.latencyMs >= 0 ? `${camera.latencyMs} ms` : 'N/A'}
+                </span>
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Última vez: {camera.lastSeen ? formatTimestamp(camera.lastSeen) : 'nunca'}
               </p>
             </div>
           ))}
         </div>
       </main>
+
       <aside
-        className={`${panelOpen ? 'w-80' : 'w-0'} transition-all overflow-hidden bg-zinc-900 border-l border-zinc-800`}
+        className={`${panelOpen ? 'w-80' : 'w-0'} shrink-0 overflow-hidden border-l border-zinc-800 bg-zinc-900 transition-all`}
       >
         <div className="p-4">
-          <h2 className="text-lg font-semibold mb-4 text-amber-400">Alertas Recientes</h2>
-          {alerts.map((a) => (
-            <div key={a.id} className="mb-3 p-3 bg-zinc-800 rounded-md text-sm">
-              <p className="text-zinc-200">{a.message}</p>
-              <p className="text-xs text-zinc-500 mt-1">{a.timestamp}</p>
+          <h2 className="mb-4 text-lg font-semibold text-amber-400">
+            Alertas {alerts.length > 0 && `(${alerts.length})`}
+          </h2>
+          {alerts.length === 0 && <p className="text-sm text-zinc-500">Sin alertas por ahora.</p>}
+          {alerts.map((alert) => (
+            <div key={alert.id} className="mb-3 rounded-md bg-zinc-800 p-3 text-sm">
+              <p className="text-zinc-200">{alert.message}</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {alert.severity} · {formatTimestamp(alert.timestamp)}
+              </p>
             </div>
           ))}
         </div>
       </aside>
+
       <button
-        onClick={() => setPanelOpen(!panelOpen)}
-        className="fixed right-0 top-1/2 -translate-y-1/2 bg-zinc-800 px-2 py-4 rounded-l-md"
+        onClick={() => setPanelOpen((open) => !open)}
+        className="fixed right-0 top-1/2 -translate-y-1/2 rounded-l-md bg-zinc-800 px-2 py-4"
+        aria-label="Mostrar u ocultar alertas"
       >
         {panelOpen ? '›' : '‹'}
       </button>
