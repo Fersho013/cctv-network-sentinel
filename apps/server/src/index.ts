@@ -3,6 +3,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
 import {
   alerts,
@@ -44,6 +45,12 @@ const app = Fastify({ logger: true });
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_INTERVAL_MS) || 30_000;
+const WEBHOOK_URLS = (process.env.WEBHOOK_URL ?? '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter(Boolean);
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+const WEBHOOK_TIMEOUT_MS = Number(process.env.WEBHOOK_TIMEOUT_MS) || 5_000;
 
 type CameraStatus = 'ONLINE' | 'OFFLINE';
 type AlertSeverity = 'info' | 'warning' | 'critical';
@@ -146,12 +153,133 @@ function toAlertDto(alert: AlertRow): AlertDto {
   };
 }
 
+interface WebhookPayload {
+  event: string;
+  message: string;
+  severity: AlertSeverity;
+  timestamp: string;
+  alertId?: number;
+  camera?: {
+    id: number;
+    name: string;
+    brand: string;
+    ipAddress: string;
+    status: string;
+  } | null;
+}
+
+interface WebhookResult {
+  url: string;
+  ok: boolean;
+  status?: number;
+  error?: string;
+}
+
+function maskWebhookUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function alertEvent(message: string): string {
+  if (/OFFLINE/i.test(message)) return 'camera.offline';
+  if (/recuperada/i.test(message)) return 'camera.online';
+  return 'alert';
+}
+
+/**
+ * Entrega un webhook con reintentos y firma HMAC opcional.
+ * Los errores 4xx no se reintentan; los 5xx y los fallos de red sí.
+ */
+async function deliverWebhook(url: string, body: string, signature: string | null): Promise<WebhookResult> {
+  const masked = maskWebhookUrl(url);
+  let lastError = 'Error desconocido';
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'cctv-network-sentinel',
+          ...(signature ? { 'X-CCTV-Signature': `sha256=${signature}` } : {}),
+        },
+        body,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (response.ok) {
+        return { url: masked, ok: true, status: response.status };
+      }
+
+      lastError = `HTTP ${response.status}`;
+      if (response.status < 500) {
+        return { url: masked, ok: false, status: response.status, error: lastError };
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = errorMessage(error);
+    }
+
+    if (attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+    }
+  }
+
+  app.log.warn({ url: masked, error: lastError }, 'No se pudo entregar el webhook');
+  return { url: masked, ok: false, error: lastError };
+}
+
+async function dispatchWebhooks(payload: WebhookPayload): Promise<WebhookResult[]> {
+  if (WEBHOOK_URLS.length === 0) return [];
+
+  const body = JSON.stringify(payload);
+  const signature = WEBHOOK_SECRET
+    ? createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex')
+    : null;
+
+  return Promise.all(WEBHOOK_URLS.map((url) => deliverWebhook(url, body, signature)));
+}
+
 async function createAlert(
   cameraId: number | null,
   message: string,
   severity: AlertSeverity,
 ) {
-  await db.insert(alerts).values({ cameraId, message, severity, timestamp: new Date() });
+  const timestamp = new Date();
+  const [alert] = await db
+    .insert(alerts)
+    .values({ cameraId, message, severity, timestamp })
+    .returning();
+
+  const camera = cameraId !== null ? await findCamera(cameraId) : undefined;
+
+  void dispatchWebhooks({
+    event: alertEvent(message),
+    message,
+    severity,
+    timestamp: timestamp.toISOString(),
+    alertId: alert?.id,
+    camera: camera
+      ? {
+          id: camera.id,
+          name: camera.name,
+          brand: camera.brand,
+          ipAddress: camera.ipAddress,
+          status: camera.status,
+        }
+      : null,
+  });
+
+  return alert;
 }
 
 function normalizeBrand(value: string | undefined): string {
@@ -582,6 +710,29 @@ app.get<{ Params: { id: string } }>('/api/cameras/:id/snapshot', async (req, rep
       error: `No se pudo capturar la imagen: ${errorMessage(error)}`,
     });
   }
+});
+
+app.get('/api/webhooks/status', async () => ({
+  configured: WEBHOOK_URLS.length,
+  targets: WEBHOOK_URLS.map(maskWebhookUrl),
+  signed: Boolean(WEBHOOK_SECRET),
+}));
+
+app.post('/api/webhooks/test', async (_req, reply) => {
+  if (WEBHOOK_URLS.length === 0) {
+    return reply.code(400).send({
+      error: 'Configura WEBHOOK_URL en apps/server/.env y reinicia el servidor.',
+    });
+  }
+
+  const results = await dispatchWebhooks({
+    event: 'test',
+    message: 'Prueba de webhook desde CCTV Network Sentinel',
+    severity: 'info',
+    timestamp: new Date().toISOString(),
+  });
+
+  return { results };
 });
 
 app.get('/api/alerts', async () => {

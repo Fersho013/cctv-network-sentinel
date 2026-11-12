@@ -72,9 +72,13 @@ DATABASE_URL=file:./cctv.db
 # FFMPEG_PATH=C:\ruta\a\ffmpeg.exe
 # CREDENTIALS_KEY=
 # HEALTH_INTERVAL_MS=30000
+# WEBHOOK_URL=https://example.com/hooks/cctv
+# WEBHOOK_SECRET=change-me
 ```
 
 - Sin token de Telegram las alertas simplemente no se envían.
+- `WEBHOOK_URL` acepta una o varias URLs separadas por comas. Se envían al crear cada alerta.
+- `WEBHOOK_SECRET` firma el cuerpo con HMAC-SHA256 en la cabecera `X-CCTV-Signature: sha256=...`.
 - `CREDENTIALS_KEY` debe tener 32 bytes (64 caracteres hex o base64). Si se omite, el servidor genera `.credentials-key` junto a su carpeta de trabajo; **conserva ese archivo** o perderás las contraseñas guardadas.
 - `VITE_API_URL` en el dashboard permite apuntar a otra IP/puerto de API (por defecto `http://localhost:3000`).
 
@@ -134,6 +138,8 @@ npm run db:studio     # abre Drizzle Studio
 | GET    | `/api/cameras/:id/snapshot`    | Última imagen JPEG (caché de 4 s)                        |
 | GET    | `/streams/:id/index.m3u8`      | Playlist HLS y segmentos                                 |
 | GET    | `/api/alerts`                  | Últimas 200 alertas                                      |
+| GET    | `/api/webhooks/status`         | Webhooks configurados (URLs enmascaradas)                |
+| POST   | `/api/webhooks/test`           | Envía un webhook de prueba                               |
 | GET    | `/api/history`                 | Últimos 200 heartbeats                                   |
 | GET    | `/api/scan/status`             | Indica si hay un escaneo en curso                        |
 | POST   | `/api/scan`                    | Escanea `{ "subnet": "192.168.1" }` y actualiza cámaras  |
@@ -147,10 +153,36 @@ curl -X POST http://localhost:3000/api/cameras \
   -d '{"name":"Entrada","brand":"tapo","ipAddress":"192.168.1.50","username":"camuser","password":"secreto","channel":1}'
 ```
 
+## Webhooks
+
+Cuando se crea una alerta (cámara offline, recuperada, etc.) el servidor envía un `POST` JSON a cada `WEBHOOK_URL`:
+
+```json
+{
+  "event": "camera.offline",
+  "message": "Cámara OFFLINE: Entrada (192.168.1.50)",
+  "severity": "warning",
+  "timestamp": "2026-11-12T08:00:00.000Z",
+  "alertId": 12,
+  "camera": {
+    "id": 3,
+    "name": "Entrada",
+    "brand": "tapo",
+    "ipAddress": "192.168.1.50",
+    "status": "OFFLINE"
+  }
+}
+```
+
+- Eventos: `camera.offline`, `camera.online`, `alert`.
+- Hasta 3 intentos con espera exponencial (500 ms, 1 s). Los 4xx no se reintentan.
+- Firma opcional: `X-CCTV-Signature: sha256=<hmac>` calculada sobre el cuerpo exacto con `WEBHOOK_SECRET`.
+- Comprueba la configuración con `GET /api/webhooks/status` y prueba el envío con `POST /api/webhooks/test`.
+
 ## Limitaciones conocidas
 
 - El vídeo requiere FFmpeg instalado; sin él, el estado online/offline sigue funcionando.
 - Las URLs RTSP usan TCP; algunas cámaras antiguas solo soportan UDP.
-- Las alertas de Telegram están implementadas; falta el envío a webhooks genéricos.
 - No hay autenticación ni TLS: pensado para LAN de confianza.
 - La reproducción en navegador usa HLS (latencia ~1-3 s). Para latencia menor se puede añadir WebRTC con go2rtc.
+- Los webhooks no se guardan en la base de datos: se configuran por entorno.
