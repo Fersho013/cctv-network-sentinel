@@ -7,7 +7,12 @@
     "types": ["node"],
     "outDir": "dist",
     "rootDir": "src",
-    "noEmit": false
+    "noEmit": false,
+    "baseUrl": ".",
+    "paths": {
+      "@cctv/core": ["../../packages/core/dist/index.d.ts"],
+      "@cctv/db": ["../../packages/db/dist/index.d.ts"]
+    }
   },
   "include": ["src"]
 }

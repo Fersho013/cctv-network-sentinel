@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --tsconfig tsconfig.runtime.json src/index.ts",
     "prebuild": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
     "build": "tsc -p tsconfig.json",
     "pretypecheck": "npm run build --workspace=@cctv/core && npm run build --workspace=@cctv/db",
