@@ -93,11 +93,74 @@ export interface ScanResponse {
 export const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:3000';
 
+const TOKEN_KEY = 'cctv.token';
+
+let unauthorizedHandler: (() => void) | null = null;
+
+export function getToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setToken(token: string | null) {
+  try {
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // Sin almacenamiento el token vive solo mientras dure la pestaña.
+  }
+}
+
+export function logout() {
+  setToken(null);
+}
+
+export function onUnauthorized(handler: () => void) {
+  unauthorizedHandler = handler;
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export interface AuthStatus {
+  authDisabled: boolean;
+  authenticated: boolean;
+}
+
+export function authStatus() {
+  return request<AuthStatus>('/api/auth/status');
+}
+
+export async function login(pin: string) {
+  const result = await request<{ token: string; expiresAt: string }>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ pin }),
+  });
+  setToken(result.token);
+  return result;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...(init?.headers as Record<string, string> | undefined),
+    },
   });
+
+  if (response.status === 401) {
+    setToken(null);
+    unauthorizedHandler?.();
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? 'Sesión expirada. Vuelve a introducir el PIN.');
+  }
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -105,6 +168,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+/** Añade el token a URLs que se piden sin cabeceras (img, video, HLS). */
+export function withToken(url: string): string {
+  const token = getToken();
+  if (!token) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
 }
 
 export function fetchCameras() {
@@ -153,11 +223,11 @@ export function stopLive(id: number) {
 }
 
 export function snapshotUrl(id: number, cacheBuster = 0) {
-  return `${API_BASE}/api/cameras/${id}/snapshot?t=${cacheBuster}`;
+  return withToken(`${API_BASE}/api/cameras/${id}/snapshot?t=${cacheBuster}`);
 }
 
 export function liveUrl(hlsUrl: string) {
-  return hlsUrl.startsWith('http') ? hlsUrl : `${API_BASE}${hlsUrl}`;
+  return withToken(hlsUrl.startsWith('http') ? hlsUrl : `${API_BASE}${hlsUrl}`);
 }
 
 export function scanSubnet(subnet: string) {

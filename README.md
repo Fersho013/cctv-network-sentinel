@@ -82,6 +82,37 @@ DATABASE_URL=file:./cctv.db
 - `CREDENTIALS_KEY` debe tener 32 bytes (64 caracteres hex o base64). Si se omite, el servidor genera `.credentials-key` junto a su carpeta de trabajo; **conserva ese archivo** o perderás las contraseñas guardadas.
 - `VITE_API_URL` en el dashboard permite apuntar a otra IP/puerto de API (por defecto `http://localhost:3000`).
 
+## Acceso con PIN
+
+El dashboard y la API están protegidos por un PIN. Al arrancar, el servidor lo muestra en el log y lo guarda en `apps/server/.dashboard-pin`:
+
+```text
+{"pin":"900691","msg":"PIN de acceso al dashboard"}
+```
+
+- **Cambiar el PIN**: edita `apps/server/.dashboard-pin` y reinicia, o define `DASHBOARD_PIN=1234` en `.env`.
+- **Sesión**: al introducir el PIN correcto se emite un token firmado (HMAC) válido 30 días. El token viaja en `Authorization: Bearer …` y, para el vídeo HLS, en `?token=…`.
+- **Intentos**: 5 PIN erróneos por IP bloquean el login 5 minutos.
+- **Desactivar** (solo en desarrollo): `AUTH_DISABLED=1`.
+- `AUTH_SECRET` (32+ caracteres) permite fijar la clave de firma; si se omite, se genera `.auth-secret`. **Consérvalo**, o todas las sesiones se invalidarán.
+
+## Acceso remoto desde otra red (Tailscale)
+
+Para ver las cámaras desde el trabajo sin abrir puertos en el router:
+
+1. Instala Tailscale en el PC (donde corre el servidor) y en el móvil, con **la misma cuenta**.
+2. Averigua la IP del PC en la tailnet:
+
+   ```powershell
+   & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+   ```
+
+3. En la app móvil pon como servidor `http://100.x.y.z:3000` y pulsa **Conectar**.
+4. En Expo Go, la URL del proyecto será `exp://100.x.y.z:8081` (misma IP, puerto de Metro).
+
+La cámara sigue en la red local: el PC hace RTSP → HLS y solo el vídeo ya convertido viaja por la VPN cifrada. La calidad depende de tu **velocidad de subida**; si va justa, usa `/stream2` en la cámara para verla en 480p.
+
+
 ## Conectar una TP-Link Tapo (C200C y similares)
 
 RTSP viene desactivado por defecto y no se usa la cuenta de TP-Link.
@@ -127,6 +158,8 @@ npm run db:studio     # abre Drizzle Studio
 | Método | Ruta                           | Descripción                                              |
 | ------ | ------------------------------ | -------------------------------------------------------- |
 | GET    | `/health`                      | Estado del servidor y rutas de FFmpeg/FFprobe            |
+| POST   | `/api/auth/login`              | `{ "pin": "900691" }` → token de sesión (30 días)        |
+| GET    | `/api/auth/status`             | Indica si el token enviado es válido                     |
 | GET    | `/api/camera-presets`          | Presets RTSP por marca                                   |
 | GET    | `/api/cameras`                 | Lista de cámaras (sin contraseñas)                       |
 | POST   | `/api/cameras`                 | Crea una cámara con credenciales cifradas                |
@@ -145,11 +178,15 @@ npm run db:studio     # abre Drizzle Studio
 | POST   | `/api/scan`                    | Escanea `{ "subnet": "192.168.1" }` y actualiza cámaras  |
 | POST   | `/heartbeat`                   | Registra estado de una cámara                            |
 
-Ejemplo de alta:
+Ejemplo de alta (todas las rutas `/api/*` y `/streams/*` requieren el token de `/api/auth/login`):
 
 ```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" -d '{"pin":"900691"}' | jq -r .token)
+
 curl -X POST http://localhost:3000/api/cameras \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Entrada","brand":"tapo","ipAddress":"192.168.1.50","username":"camuser","password":"secreto","channel":1}'
 ```
 

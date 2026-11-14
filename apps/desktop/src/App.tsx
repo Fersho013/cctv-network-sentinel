@@ -1,5 +1,5 @@
-import DashboardGrid from './components/DashboardGrid';
+import AuthGate from './components/AuthGate';
 
 export default function App() {
-  return <DashboardGrid />;
+  return <AuthGate />;
 }

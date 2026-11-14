@@ -1,8 +1,8 @@
 import cors from '@fastify/cors';
-import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
+import path from 'node:path';
 import { createHmac } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
 import {
@@ -23,6 +23,17 @@ import {
   resolveStreamPath,
 } from './camera-config';
 import { decryptSecret, encryptSecret } from './crypto';
+import {
+  checkLoginAllowed,
+  clearLoginAttempts,
+  extractToken,
+  getDashboardPin,
+  isAuthDisabled,
+  issueToken,
+  recordFailedLogin,
+  verifyPin,
+  verifyToken,
+} from './auth';
 import {
   captureSnapshot,
   ensureStream,
@@ -104,14 +115,11 @@ async function sendTelegramAlert(text: string) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
   try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
-      },
-    );
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+    });
 
     if (!response.ok) {
       app.log.warn({ status: response.status }, 'Telegram respondió con error');
@@ -194,7 +202,11 @@ function alertEvent(message: string): string {
  * Entrega un webhook con reintentos y firma HMAC opcional.
  * Los errores 4xx no se reintentan; los 5xx y los fallos de red sí.
  */
-async function deliverWebhook(url: string, body: string, signature: string | null): Promise<WebhookResult> {
+async function deliverWebhook(
+  url: string,
+  body: string,
+  signature: string | null,
+): Promise<WebhookResult> {
   const masked = maskWebhookUrl(url);
   let lastError = 'Error desconocido';
 
@@ -249,11 +261,7 @@ async function dispatchWebhooks(payload: WebhookPayload): Promise<WebhookResult[
   return Promise.all(WEBHOOK_URLS.map((url) => deliverWebhook(url, body, signature)));
 }
 
-async function createAlert(
-  cameraId: number | null,
-  message: string,
-  severity: AlertSeverity,
-) {
+async function createAlert(cameraId: number | null, message: string, severity: AlertSeverity) {
   const timestamp = new Date();
   const [alert] = await db
     .insert(alerts)
@@ -298,8 +306,7 @@ function normalizeBrand(value: string | undefined): string {
 function isValidIp(ip: string): boolean {
   const octets = ip.split('.');
   return (
-    octets.length === 4 &&
-    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    octets.length === 4 && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
   );
 }
 
@@ -352,11 +359,7 @@ async function checkCameraHealth(camera: CameraRow) {
     await createAlert(camera.id, message, 'warning');
     void sendTelegramAlert(`⚠️ ${message}`);
   } else if (previousStatus === 'OFFLINE' && nextStatus === 'ONLINE') {
-    await createAlert(
-      camera.id,
-      `Cámara recuperada: ${camera.name} (${camera.ipAddress})`,
-      'info',
-    );
+    await createAlert(camera.id, `Cámara recuperada: ${camera.name} (${camera.ipAddress})`, 'info');
   }
 }
 
@@ -441,20 +444,88 @@ async function applyScanResults(results: ScanResult[], subnet: string) {
 fs.mkdirSync(HLS_ROOT, { recursive: true });
 
 app.register(cors, { origin: true });
-app.register(fastifyStatic, {
-  root: HLS_ROOT,
-  prefix: '/streams/',
-  decorateReply: false,
-  cacheControl: false,
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-store');
-  },
+
+// Rutas públicas: salud y login. Todo lo demás exige token de sesión.
+const PUBLIC_PATHS = new Set(['/health', '/api/auth/login', '/api/auth/status']);
+
+app.addHook('onRequest', async (req, reply) => {
+  const pathname = req.url.split('?')[0];
+
+  // Mantiene viva la sesión de FFmpeg al pedir playlist o segmentos.
+  const match = /^\/streams\/(\d+)\//.exec(pathname);
+  if (match) touchStream(Number(match[1]));
+
+  if (isAuthDisabled() || PUBLIC_PATHS.has(pathname)) return;
+  if (!pathname.startsWith('/api/') && !pathname.startsWith('/streams/')) return;
+
+  if (!verifyToken(extractToken(req))) {
+    return reply.code(401).send({ error: 'Inicia sesión con el PIN para continuar.' });
+  }
 });
 
-// Cada petición a un playlist o segmento mantiene viva la sesión de FFmpeg.
-app.addHook('onRequest', async (req) => {
-  const match = /^\/streams\/(\d+)\//.exec(req.url);
-  if (match) touchStream(Number(match[1]));
+app.post<{ Body?: { pin?: string } }>('/api/auth/login', async (req, reply) => {
+  const gate = checkLoginAllowed(req.ip);
+  if (!gate.allowed) {
+    const minutes = Math.ceil(gate.retryAfterMs / 60_000);
+    return reply
+      .code(429)
+      .send({ error: `Demasiados intentos. Vuelve a probar en ${minutes} min.` });
+  }
+
+  const pin = req.body?.pin?.trim() ?? '';
+  if (!pin || !verifyPin(pin)) {
+    recordFailedLogin(req.ip);
+    return reply.code(401).send({ error: 'PIN incorrecto.' });
+  }
+
+  clearLoginAttempts(req.ip);
+  return issueToken();
+});
+
+app.get('/api/auth/status', async (req) => ({
+  authDisabled: isAuthDisabled(),
+  authenticated: isAuthDisabled() || verifyToken(extractToken(req)),
+}));
+
+app.get<{ Params: { id: string; file: string } }>('/streams/:id/:file', async (req, reply) => {
+  const { id, file } = req.params;
+  if (!/^\d+$/.test(id) || !/^[A-Za-z0-9._-]+$/.test(file)) {
+    return reply.code(400).send({ error: 'Ruta de stream inválida.' });
+  }
+
+  const dir = path.join(HLS_ROOT, id);
+  const full = path.join(dir, file);
+  if (path.dirname(full) !== dir) {
+    return reply.code(400).send({ error: 'Ruta de stream inválida.' });
+  }
+
+  let isFile = false;
+  try {
+    isFile = fs.statSync(full).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) return reply.code(404).send({ error: 'Segmento no encontrado.' });
+
+  if (file.endsWith('.m3u8')) {
+    const raw = fs.readFileSync(full, 'utf8');
+    const token = extractToken(req);
+    // Los segmentos se piden sin cabeceras desde el reproductor nativo,
+    // así que propagamos el token en la propia playlist.
+    const body = token
+      ? raw.replace(/^(?!#)(\S+)$/gm, (line) => `${line}?token=${encodeURIComponent(token)}`)
+      : raw;
+
+    return reply
+      .header('Content-Type', 'application/vnd.apple.mpegurl')
+      .header('Cache-Control', 'no-store')
+      .send(body);
+  }
+
+  return reply
+    .header('Content-Type', 'video/mp2t')
+    .header('Cache-Control', 'no-store')
+    .send(fs.createReadStream(full));
 });
 
 app.get('/health', async () => ({
@@ -480,10 +551,7 @@ app.post<{ Body?: CameraInput }>('/api/cameras', async (req, reply) => {
     return reply.code(400).send({ error: 'La dirección IP no es válida.' });
   }
 
-  const [existing] = await db
-    .select()
-    .from(cameras)
-    .where(eq(cameras.ipAddress, ipAddress));
+  const [existing] = await db.select().from(cameras).where(eq(cameras.ipAddress, ipAddress));
 
   if (existing) {
     return reply.code(409).send({ error: 'Ya existe una cámara con esa IP.' });
@@ -536,10 +604,7 @@ app.patch<{ Params: { id: string }; Body?: CameraInput }>(
         return reply.code(400).send({ error: 'La dirección IP no es válida.' });
       }
       if (ipAddress !== camera.ipAddress) {
-        const [duplicate] = await db
-          .select()
-          .from(cameras)
-          .where(eq(cameras.ipAddress, ipAddress));
+        const [duplicate] = await db.select().from(cameras).where(eq(cameras.ipAddress, ipAddress));
         if (duplicate) {
           return reply.code(409).send({ error: 'Ya existe una cámara con esa IP.' });
         }
@@ -609,11 +674,7 @@ app.post<{
   const streamPath = resolveStreamPath(brand, body.streamPath ?? base?.streamPath ?? '', channel);
   const username = body.username?.trim() ?? base?.username ?? '';
   const password =
-    body.password !== undefined
-      ? body.password
-      : base
-        ? decryptSecret(base.passwordEnc ?? '')
-        : '';
+    body.password !== undefined ? body.password : base ? decryptSecret(base.passwordEnc ?? '') : '';
 
   const rtspUrl = buildRtspUrl({
     brand,
@@ -741,11 +802,7 @@ app.get('/api/alerts', async () => {
 });
 
 app.get('/api/history', async () => {
-  const rows = await db
-    .select()
-    .from(healthLogs)
-    .orderBy(desc(healthLogs.timestamp))
-    .limit(200);
+  const rows = await db.select().from(healthLogs).orderBy(desc(healthLogs.timestamp)).limit(200);
 
   return rows.map((row) => ({
     id: row.id,
@@ -850,11 +907,7 @@ app.post<{
     await createAlert(camera.id, message, 'warning');
     await sendTelegramAlert(`⚠️ ${message}`);
   } else if (previousStatus === 'OFFLINE' && nextStatus === 'ONLINE') {
-    await createAlert(
-      camera.id,
-      `Cámara recuperada: ${camera.name} (${camera.ipAddress})`,
-      'info',
-    );
+    await createAlert(camera.id, `Cámara recuperada: ${camera.name} (${camera.ipAddress})`, 'info');
   }
 
   app.log.info({ msg: 'heartbeat received', cameraId: camera.id, status: nextStatus });
@@ -878,10 +931,18 @@ const start = async () => {
     await runMigrations();
     await app.listen({ port: Number(process.env.PORT) || 3000, host: '0.0.0.0' });
 
-    app.log.info(
-      { ffmpeg: getFfmpegPath(), ffprobe: getFfprobePath() },
-      'FFmpeg localizado',
-    );
+    app.log.info({ ffmpeg: getFfmpegPath(), ffprobe: getFfprobePath() }, 'FFmpeg localizado');
+
+    if (isAuthDisabled()) {
+      app.log.warn(
+        'Autenticación desactivada (AUTH_DISABLED=1). Cualquiera en la red puede entrar.',
+      );
+    } else {
+      app.log.info(
+        { pin: getDashboardPin() },
+        'PIN de acceso al dashboard (guárdalo; también está en .dashboard-pin)',
+      );
+    }
 
     setTimeout(() => void runHealthMonitor(), 5_000).unref();
     const timer = setInterval(() => void runHealthMonitor(), HEALTH_INTERVAL_MS);
