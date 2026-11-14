@@ -106,7 +106,7 @@ function inputArgs(source: string): string[] {
   const args = ['-hide_banner', '-loglevel', 'error'];
 
   if (/^rtsps?:\/\//i.test(source)) {
-    args.push('-rtsp_transport', 'tcp', '-rw_timeout', '15000000');
+    args.push('-rtsp_transport', 'tcp');
   }
 
   args.push('-i', source);
@@ -174,7 +174,9 @@ function spawnSession(session: StreamSession) {
 
   child.stderr?.on('data', (chunk: Buffer) => {
     if (process.env.FFMPEG_DEBUG === '1') {
-      process.stderr.write(`[ffmpeg ${session.cameraId}] ${chunk.toString()}`);
+      // Nunca escribas credenciales RTSP en los logs.
+      const text = chunk.toString().replace(/\/\/([^:/@\s]+):([^@\s]*)@/g, '//$1:***@');
+      process.stderr.write(`[ffmpeg ${session.cameraId}] ${text}`);
     }
   });
 
@@ -381,7 +383,7 @@ export function probeStream(rtspUrl: string, timeoutMs = 15_000): Promise<ProbeR
     const args = ['-hide_banner', '-loglevel', 'error'];
 
     if (/^rtsps?:\/\//i.test(rtspUrl)) {
-      args.push('-rtsp_transport', 'tcp', '-rw_timeout', '15000000');
+      args.push('-rtsp_transport', 'tcp');
     }
 
     args.push(
